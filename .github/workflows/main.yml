@@ -22,6 +22,35 @@ jobs:
           # Create firewall rule to allow RDP traffic
           netsh advfirewall firewall add rule name="RDP-Inbound" dir=in action=allow protocol=TCP localport=3389
 
+      # ------------------------------------------------------------
+      # NEW: set a password for runneradmin (generated randomly)
+      # ------------------------------------------------------------
+      - name: Set runneradmin Password
+        run: |
+          # Generate a random strong password (meets Windows complexity rules)
+          $upper   = 'ABCDEFGHJKLMNPQRSTUVWXYZ'.ToCharArray()
+          $lower   = 'abcdefghijkmnopqrstuvwxyz'.ToCharArray()
+          $digits  = '23456789'.ToCharArray()
+          $symbols = '@#%+='.ToCharArray()
+          $all     = $upper + $lower + $digits + $symbols
+
+          $chars  = @()
+          $chars += $upper   | Get-Random -Count 3
+          $chars += $lower   | Get-Random -Count 3
+          $chars += $digits  | Get-Random -Count 3
+          $chars += $symbols | Get-Random -Count 2
+          $chars += $all     | Get-Random -Count 5
+          $password = -join ($chars | Sort-Object { Get-Random })
+
+          # Apply the password to the runneradmin account
+          net user runneradmin "$password"
+          net user runneradmin /active:yes
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+
+          # Pass it to the next steps (GITHUB_ENV values are NOT masked in logs)
+          "RDP_USER=runneradmin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Install Tailscale
         run: |
           # Download and install Tailscale quietly
@@ -36,18 +65,26 @@ jobs:
           # Login to Tailscale using interactive browser link generated in logs
           & "C:\Program Files\Tailscale\tailscale.exe" up
 
-      - name: Wait for Tailscale Connection & Verify IP
+      - name: Wait for Tailscale Connection & Show RDP Login Info
         run: |
           # Loop to wait until Tailscale connection gets an IP assigned
           $timeout = [System.Diagnostics.Stopwatch]::StartNew()
+          $ip = $null
           do {
               $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-              if ($ip) {
-                  Write-Host "Tailscale IP Assigned: $ip"
-                  break
-              }
+              if ($ip) { break }
               Start-Sleep -Seconds 5
           } while ($timeout.Elapsed.TotalMinutes -lt 5)
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "            RDP LOGIN INFORMATION"
+          Write-Host "=============================================="
+          Write-Host "  IP       : $ip"
+          Write-Host "  Username : $env:RDP_USER"
+          Write-Host "  Password : $env:RDP_PASSWORD"
+          Write-Host "=============================================="
+          Write-Host ""
 
       - name: Setup Download Directory and Execution Loop
         run: |
@@ -76,11 +113,10 @@ jobs:
               }
           }
 
-      # Keep runner alive
+      # Keep runner alive (also re-prints the login info so it is easy to find)
       - name: Keep Runner Alive
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Write-Host "[$(Get-Date)] RDP Active | User: $env:RDP_USER | Password: $env:RDP_PASSWORD"
               Start-Sleep -Seconds 300
           }
-          
