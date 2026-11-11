@@ -1,0 +1,86 @@
+name: win rdp / toGitHub / Download.bat script
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 350
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Remote Desktop and disable Network Level Authentication (If needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Inbound"
+
+          # Create firewall rule to allow RDP traffic
+          netsh advfirewall firewall add rule name="RDP-Inbound" dir=in action=allow protocol=TCP localport=3389
+
+      - name: Install Tailscale
+        run: |
+          # Download and install Tailscale quietly
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env:TEMP\tailscale-setup.exe"
+          Start-Process -FilePath "$env:TEMP\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
+
+      - name: Start Tailscale Service & Authenticate
+        run: |
+          # Ensure Tailscale service is running
+          Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+
+          # Login to Tailscale using interactive browser link generated in logs
+          & "C:\Program Files\Tailscale\tailscale.exe" up
+
+      - name: Wait for Tailscale Connection & Verify IP
+        run: |
+          # Loop to wait until Tailscale connection gets an IP assigned
+          $timeout = [System.Diagnostics.Stopwatch]::StartNew()
+          do {
+              $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+              if ($ip) {
+                  Write-Host "Tailscale IP Assigned: $ip"
+                  break
+              }
+              Start-Sleep -Seconds 5
+          } while ($timeout.Elapsed.TotalMinutes -lt 5)
+
+      - name: Setup Download Directory and Execution Loop
+        run: |
+          $downloadPath = "$env:USERPROFILE\Downloads\Downloads.bat"
+          $timeout = [System.Diagnostics.Stopwatch]::StartNew()
+
+          # Loop waiting for profile creation and executing Download.bat
+          while ($timeout.Elapsed.TotalMinutes -lt 300) {
+              if (Test-Path $downloadPath) {
+                  Write-Host "-> Downloads.bat copied to $downloadPath"
+
+                  # Run the batch file for the first time
+                  try {
+                      cmd /c $downloadPath
+                      Write-Host "-> Downloads.bat executed successfully"
+                      break
+                  }
+                  catch {
+                      Write-Host "-> Error copying or executing Downloads.bat: $($_.Exception.Message)"
+                      break
+                  }
+              }
+              else {
+                  Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
+                  Start-Sleep -Seconds 30
+              }
+          }
+
+      # Keep runner alive
+      - name: Keep Runner Alive
+        run: |
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
+          
